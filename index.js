@@ -32,6 +32,32 @@ function normalizeCategory(category) {
     return parts.join(': ');
 }
 
+// Función para normalizar nombres de productos
+function normalizeProductName(name) {
+    if (!name) return null;
+
+    // Lista de palabras que siempre deben ir en minúscula
+    const lowercaseWords = ['y', 'e', 'o', 'de', 'del', 'la', 'las', 'el', 'los', 'para', 'con', 'en'];
+
+    return name
+        .trim()
+        .replace(/\s+/g, ' ') // Eliminar espacios múltiples
+        .split(' ')
+        .map((word, index) => {
+            // Convertir la palabra a minúsculas para la comparación
+            const lowerWord = word.toLowerCase();
+
+            // Si es una palabra que debe ir en minúscula y no es la primera palabra
+            if (lowercaseWords.includes(lowerWord) && index !== 0) {
+                return lowerWord;
+            }
+
+            // Para el resto de palabras, primera letra mayúscula
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(' ');
+}
+
 async function scrapeJPMascota() {
     const browser = await chromium.launch({ headless: false });
     const page = await browser.newPage();
@@ -42,9 +68,8 @@ async function scrapeJPMascota() {
 
         // Obtener categorías principales de ambas ubicaciones
         const mainCategories = await page.evaluate(() => {
-            const categories = new Set(); // Usamos Set para evitar duplicados
+            const categories = new Set();
 
-            // Función helper para procesar menús
             const processMenus = (selector) => {
                 document.querySelectorAll(selector).forEach(parent => {
                     const link = parent.querySelector('a');
@@ -58,7 +83,6 @@ async function scrapeJPMascota() {
                 });
             };
 
-            // Procesar ambas ubicaciones
             processMenus('.navleft-container.hidden-md-down .parentMenu');
             processMenus('.nav-container.hidden-md-down .parentMenu');
 
@@ -73,13 +97,11 @@ async function scrapeJPMascota() {
 
             await page.goto(mainCategory.url, { waitUntil: 'networkidle' });
 
-            // Verificar si hay subcategorías
             const hasSubcategories = await page.evaluate(() => {
                 return !!document.querySelector('.block-categories.hidden-sm-down .category-sub-menu');
             });
 
             if (hasSubcategories) {
-                // Obtener subcategorías
                 const subCategories = await page.evaluate((parentName) => {
                     const subLinks = document.querySelectorAll('.block-categories.hidden-sm-down .category-sub-menu a');
                     return Array.from(subLinks).map(link => ({
@@ -88,7 +110,6 @@ async function scrapeJPMascota() {
                     }));
                 }, normalizedMainCategory);
 
-                // Procesar cada subcategoría
                 for (const subCategory of subCategories) {
                     const normalizedSubCategory = normalizeCategory(subCategory.name);
                     console.log(`Procesando subcategoría: ${normalizedSubCategory}`);
@@ -102,7 +123,7 @@ async function scrapeJPMascota() {
 
                         await page.goto(pageUrl, { waitUntil: 'networkidle' });
 
-                        // Extraer productos de la página actual
+                        // Extraer productos con nombres normalizados
                         const products = await page.evaluate((categoryName) => {
                             const items = [];
                             document.querySelectorAll('.products.row.product_content.grid .item-product').forEach(product => {
@@ -111,7 +132,7 @@ async function scrapeJPMascota() {
 
                                 if (imgBlock || productName) {
                                     items.push({
-                                        nombre_producto: productName ? productName.textContent.trim() : null,
+                                        nombre_producto_original: productName ? productName.textContent.trim() : null,
                                         imagen_url: imgBlock ? imgBlock.src : null,
                                         categoria: categoryName
                                     });
@@ -120,12 +141,19 @@ async function scrapeJPMascota() {
                             return items;
                         }, normalizedSubCategory);
 
-                        if (products.length > 0) {
-                            allProductsData.push(...products);
-                            console.log(`Encontrados ${products.length} productos en la página ${currentPage}`);
+                        // Normalizar nombres de productos
+                        const normalizedProducts = products.map(product => ({
+                            ...product,
+                            nombre_producto: normalizeProductName(product.nombre_producto_original),
+                            // Eliminamos el nombre original para no guardarlo
+                            nombre_producto_original: undefined
+                        }));
+
+                        if (normalizedProducts.length > 0) {
+                            allProductsData.push(...normalizedProducts);
+                            console.log(`Encontrados ${normalizedProducts.length} productos en la página ${currentPage}`);
                         }
 
-                        // Verificar si existe siguiente página
                         hasNextPage = await page.evaluate(() => {
                             const nextButton = document.querySelector('a.next.js-search-link');
                             return nextButton && !nextButton.classList.contains('disabled');
@@ -138,7 +166,6 @@ async function scrapeJPMascota() {
                     }
                 }
             } else {
-                // Procesar la categoría principal directamente
                 let currentPage = 1;
                 let hasNextPage = true;
 
@@ -148,7 +175,7 @@ async function scrapeJPMascota() {
 
                     await page.goto(pageUrl, { waitUntil: 'networkidle' });
 
-                    // Extraer productos de la página actual
+                    // Extraer productos con nombres normalizados
                     const products = await page.evaluate((categoryName) => {
                         const items = [];
                         document.querySelectorAll('.products.row.product_content.grid .item-product').forEach(product => {
@@ -157,7 +184,7 @@ async function scrapeJPMascota() {
 
                             if (imgBlock || productName) {
                                 items.push({
-                                    nombre_producto: productName ? productName.textContent.trim() : null,
+                                    nombre_producto_original: productName ? productName.textContent.trim() : null,
                                     imagen_url: imgBlock ? imgBlock.src : null,
                                     categoria: categoryName
                                 });
@@ -166,12 +193,19 @@ async function scrapeJPMascota() {
                         return items;
                     }, normalizedMainCategory);
 
-                    if (products.length > 0) {
-                        allProductsData.push(...products);
-                        console.log(`Encontrados ${products.length} productos en la página ${currentPage}`);
+                    // Normalizar nombres de productos
+                    const normalizedProducts = products.map(product => ({
+                        ...product,
+                        nombre_producto: normalizeProductName(product.nombre_producto_original),
+                        // Eliminamos el nombre original para no guardarlo
+                        nombre_producto_original: undefined
+                    }));
+
+                    if (normalizedProducts.length > 0) {
+                        allProductsData.push(...normalizedProducts);
+                        console.log(`Encontrados ${normalizedProducts.length} productos en la página ${currentPage}`);
                     }
 
-                    // Verificar si existe siguiente página
                     hasNextPage = await page.evaluate(() => {
                         const nextButton = document.querySelector('a.next.js-search-link');
                         return nextButton && !nextButton.classList.contains('disabled');
