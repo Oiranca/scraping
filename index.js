@@ -2,6 +2,36 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const { Parser } = require('json2csv');
 
+// Función para normalizar las categorías
+function normalizeCategory(category) {
+    // Lista de palabras que siempre deben ir en minúscula
+    const lowercaseWords = ['y', 'e', 'o', 'de', 'del', 'la', 'las', 'el', 'los', 'para', 'con', 'en'];
+
+    // Dividir por ":" para manejar subcategorías
+    const parts = category.split(':').map(part => {
+        return part
+            .trim() // Eliminar espacios al inicio y final
+            .replace(/\s+/g, ' ') // Eliminar espacios múltiples
+            .split(' ')
+            .map((word, index) => {
+                // Convertir la palabra a minúsculas para la comparación
+                const lowerWord = word.toLowerCase();
+
+                // Si es una palabra que debe ir en minúscula y no es la primera palabra
+                if (lowercaseWords.includes(lowerWord) && index !== 0) {
+                    return lowerWord;
+                }
+
+                // Para el resto de palabras, primera letra mayúscula
+                return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+            })
+            .join(' ');
+    });
+
+    // Volver a unir las partes si había ":"
+    return parts.join(': ');
+}
+
 async function scrapeJPMascota() {
     const browser = await chromium.launch({ headless: false });
     const page = await browser.newPage();
@@ -9,25 +39,38 @@ async function scrapeJPMascota() {
 
     try {
         await page.goto('https://www.jpmascota.com/', { waitUntil: 'networkidle' });
-        
-        // Obtener categorías principales
+
+        // Obtener categorías principales de ambas ubicaciones
         const mainCategories = await page.evaluate(() => {
-            const categories = [];
-            document.querySelectorAll('.navleft-container.hidden-md-down .parentMenu').forEach(parent => {
-                const link = parent.querySelector('a');
-                const span = parent.querySelector('span');
-                if (link && span) {
-                    categories.push({
-                        name: span.textContent.trim(),
-                        url: link.getAttribute('href')
-                    });
-                }
-            });
-            return categories;
+            const categories = new Set(); // Usamos Set para evitar duplicados
+
+            // Función helper para procesar menús
+            const processMenus = (selector) => {
+                document.querySelectorAll(selector).forEach(parent => {
+                    const link = parent.querySelector('a');
+                    const span = parent.querySelector('span');
+                    if (link && span) {
+                        categories.add({
+                            name: span.textContent.trim(),
+                            url: link.getAttribute('href')
+                        });
+                    }
+                });
+            };
+
+            // Procesar ambas ubicaciones
+            processMenus('.navleft-container.hidden-md-down .parentMenu');
+            processMenus('.nav-container.hidden-md-down .parentMenu');
+
+            return Array.from(categories);
         });
 
+        console.log(`Categorías principales encontradas: ${mainCategories.length}`);
+
         for (const mainCategory of mainCategories) {
-            console.log(`\nProcesando categoría principal: ${mainCategory.name}`);
+            const normalizedMainCategory = normalizeCategory(mainCategory.name);
+            console.log(`\nProcesando categoría principal: ${normalizedMainCategory}`);
+
             await page.goto(mainCategory.url, { waitUntil: 'networkidle' });
 
             // Verificar si hay subcategorías
@@ -43,27 +86,29 @@ async function scrapeJPMascota() {
                         name: `${parentName}: ${link.textContent.trim()}`,
                         url: link.getAttribute('href')
                     }));
-                }, mainCategory.name);
+                }, normalizedMainCategory);
 
                 // Procesar cada subcategoría
                 for (const subCategory of subCategories) {
-                    console.log(`Procesando subcategoría: ${subCategory.name}`);
+                    const normalizedSubCategory = normalizeCategory(subCategory.name);
+                    console.log(`Procesando subcategoría: ${normalizedSubCategory}`);
+
                     let currentPage = 1;
                     let hasNextPage = true;
 
                     while (hasNextPage) {
                         const pageUrl = `${subCategory.url}?page=${currentPage}`;
                         console.log(`Visitando página ${currentPage}: ${pageUrl}`);
-                        
+
                         await page.goto(pageUrl, { waitUntil: 'networkidle' });
-                        
+
                         // Extraer productos de la página actual
                         const products = await page.evaluate((categoryName) => {
                             const items = [];
                             document.querySelectorAll('.products.row.product_content.grid .item-product').forEach(product => {
                                 const imgBlock = product.querySelector('.img_block img');
                                 const productName = product.querySelector('.product_desc .product_name');
-                                
+
                                 if (imgBlock || productName) {
                                     items.push({
                                         nombre_producto: productName ? productName.textContent.trim() : null,
@@ -73,7 +118,7 @@ async function scrapeJPMascota() {
                                 }
                             });
                             return items;
-                        }, subCategory.name);
+                        }, normalizedSubCategory);
 
                         if (products.length > 0) {
                             allProductsData.push(...products);
@@ -88,7 +133,7 @@ async function scrapeJPMascota() {
 
                         if (hasNextPage) {
                             currentPage++;
-                            await page.waitForTimeout(2000); // Espera entre páginas
+                            await page.waitForTimeout(2000);
                         }
                     }
                 }
@@ -100,16 +145,16 @@ async function scrapeJPMascota() {
                 while (hasNextPage) {
                     const pageUrl = `${mainCategory.url}?page=${currentPage}`;
                     console.log(`Visitando página ${currentPage}: ${pageUrl}`);
-                    
+
                     await page.goto(pageUrl, { waitUntil: 'networkidle' });
-                    
+
                     // Extraer productos de la página actual
                     const products = await page.evaluate((categoryName) => {
                         const items = [];
                         document.querySelectorAll('.products.row.product_content.grid .item-product').forEach(product => {
                             const imgBlock = product.querySelector('.img_block img');
                             const productName = product.querySelector('.product_desc .product_name');
-                            
+
                             if (imgBlock || productName) {
                                 items.push({
                                     nombre_producto: productName ? productName.textContent.trim() : null,
@@ -119,7 +164,7 @@ async function scrapeJPMascota() {
                             }
                         });
                         return items;
-                    }, mainCategory.name);
+                    }, normalizedMainCategory);
 
                     if (products.length > 0) {
                         allProductsData.push(...products);
@@ -134,15 +179,9 @@ async function scrapeJPMascota() {
 
                     if (hasNextPage) {
                         currentPage++;
-                        await page.waitForTimeout(2000); // Espera entre páginas
+                        await page.waitForTimeout(2000);
                     }
                 }
-            }
-
-            // Guardar datos parciales después de cada categoría
-            if (allProductsData.length > 0) {
-                fs.writeFileSync('productos_jpmascota_partial.json', JSON.stringify(allProductsData, null, 2));
-                console.log(`Guardado parcial: ${allProductsData.length} productos totales`);
             }
         }
     } catch (error) {
