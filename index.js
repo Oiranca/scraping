@@ -2,99 +2,148 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const { Parser } = require('json2csv');
 
-async function scrapeJPMascota() {
-    const browser = await chromium.launch({
-        headless: true, // Cambiar a false si quieres ver el navegador en acción
-        timeout: 60000, // Tiempo máximo de espera para cada acción
-        args: ['--no-sandbox', '--disable-setuid-sandbox'] // Opciones para evitar problemas en algunos entornos
+async function getAllCategories(page) {
+    return await page.evaluate(() => {
+        const categories = [];
+        document.querySelectorAll('.navleft-container.hidden-md-down .parentMenu').forEach(parent => {
+            const link = parent.querySelector('a');
+            const span = parent.querySelector('span');
+            if (link && span) {
+                categories.push({
+                    name: span.textContent.trim(),
+                    url: link.getAttribute('href')
+                });
+            }
+        });
+        return categories;
     });
+}
+
+async function processPage(page, url, categoryName) {
+    await page.goto(url, { waitUntil: 'networkidle' });
+
+    return await page.evaluate((categoryName) => {
+        const products = [];
+        const productElements = document.querySelectorAll('.products.row.product_content.grid .item-product');
+
+        productElements.forEach(product => {
+            const item = {};
+            const imgBlock = product.querySelector('.img_block img');
+            const productName = product.querySelector('.product_desc .product_name');
+
+            item.imagen_url = imgBlock ? imgBlock.src : null;
+            item.nombre_producto = productName ? productName.textContent.trim() : null;
+            item.categoria = categoryName;
+
+            if (item.imagen_url || item.nombre_producto) {
+                products.push(item);
+            }
+        });
+        return products;
+    }, categoryName);
+}
+
+async function scrapeJPMascota() {
+    const browser = await chromium.launch({ headless: false });
     const page = await browser.newPage();
     let allProductsData = [];
-    let currentPage = 1;
-    let hasNextPage = true;
+    let categoriesToProcess = [];
 
-    while (hasNextPage) {
-        // Navegar a la página correspondiente
-       // await page.goto(`https://www.jpmascota.com/97-perros?page=${currentPage}`, { waitUntil: 'networkidle' });
-        await page.goto(`https://www.jpmascota.com/103-accesorios-de-ganader%C3%ADa?page=${currentPage}`, { waitUntil: 'networkidle' });
+    try {
+        await page.goto('https://www.jpmascota.com/', { waitUntil: 'networkidle' });
+        categoriesToProcess = await getAllCategories(page);
+        console.log(`Categorías iniciales encontradas: ${categoriesToProcess.length}`);
 
-        // Esperar a que los productos se carguen
-        await page.waitForSelector('.products.row.product_content.grid .item-product');
+        while (categoriesToProcess.length > 0) {
+            const category = categoriesToProcess.shift();
+            console.log(`\nProcesando: ${category.name}`);
 
-        // Extraer los productos de la página actual
-        const pageProductsData = await page.evaluate(() => {
-            const products = [];
-            const productElements = document.querySelectorAll('.products.row.product_content.grid .item-product');
+            let currentPage = 1;
+            let hasNextPage = true;
 
-            productElements.forEach(product => {
-                const item = {};
+            while (hasNextPage) {
+                const pageUrl = `${category.url}?page=${currentPage}`;
+                console.log(`Visitando: ${pageUrl}`);
+                await page.goto(pageUrl, { waitUntil: 'networkidle' });
 
-                // Extraer solo la URL de la imagen
-                const imgBlock = product.querySelector('.img_block');
-                if (imgBlock) {
-                    const imgTag = imgBlock.querySelector('img');
-                    item.imagen_url = imgTag ? imgTag.src : null;
+                // Verificar subcategorías
+                const subCategories = await page.evaluate(() => {
+                    const blockCategories = document.querySelector('.block-categories.hidden-sm-down');
+                    if (blockCategories) {
+                        const subLinks = blockCategories.querySelectorAll('.category-sub-menu a');
+                        return Array.from(subLinks).map(link => ({
+                            name: link.textContent.trim(),
+                            url: link.getAttribute('href')
+                        }));
+                    }
+                    return [];
+                });
+
+                if (subCategories.length > 0) {
+                    console.log(`Encontradas ${subCategories.length} subcategorías en ${category.name}`);
+                    categoriesToProcess.push(...subCategories);
+                    break;
                 }
 
-                // Extraer nombre del producto
-                const productDesc = product.querySelector('.product_desc');
-                if (productDesc) {
-                    const productNameTag = productDesc.querySelector('.product_name');
-                    item.nombre_producto = productNameTag ? productNameTag.textContent.trim() : null;
+                // Procesar productos de la página actual
+                try {
+                    await page.waitForSelector('.products.row.product_content.grid .item-product', { timeout: 5000 });
+                    const pageProducts = await processPage(page, pageUrl, category.name);
+                    allProductsData.push(...pageProducts);
+                    console.log(`Obtenidos ${pageProducts.length} productos`);
+
+                    // Guardar datos parciales cada 100 productos
+                    if (allProductsData.length % 100 === 0) {
+                        fs.writeFileSync('productos_jpmascota_partial.json', JSON.stringify(allProductsData, null, 2));
+                        console.log('Guardado parcial realizado');
+                    }
+
+                    // Verificar siguiente página
+                    hasNextPage = await page.evaluate(() => {
+                        const nextLink = document.querySelector('a.next.js-search-link');
+                        return nextLink && !nextLink.classList.contains('disabled');
+                    });
+
+                    if (hasNextPage) {
+                        currentPage++;
+                        await page.waitForTimeout(2000);
+                    }
+                } catch (error) {
+                    console.log('No se encontraron productos en esta página');
+                    break;
                 }
-
-                // Solo añadir al array si se ha encontrado información relevante
-                if (item.imagen_url || item.nombre_producto) {
-                    products.push(item);
-                }
-            });
-            return products;
-        });
-
-        // Añadir los productos de esta página al array general
-        allProductsData = [...allProductsData, ...pageProductsData];
-
-        // Verificar si hay siguiente página
-        hasNextPage = await page.evaluate(() => {
-            const nextButton = document.querySelector('.pagination .next:not(.disabled)');
-            return !!nextButton;
-        });
-
-        console.log(`Página ${currentPage} procesada. Productos encontrados: ${pageProductsData.length}`);
-        currentPage++;
-
-        // Pequeña pausa entre páginas para no sobrecargar el servidor
-        await page.waitForTimeout(1000);
+            }
+        }
+    } catch (error) {
+        console.error('Error durante el scraping:', error);
+    } finally {
+        await browser.close();
     }
 
-    await browser.close();
     return allProductsData;
 }
 
 async function main() {
     try {
-        console.log('Iniciando el proceso de scraping...');
+        console.log('Iniciando scraping...');
         const data = await scrapeJPMascota();
 
-        console.log(`Total de productos encontrados: ${data.length}`);
-
-        // Guardar en JSON
-        fs.writeFileSync('productos_jpmascota.json', JSON.stringify(data, null, 2));
-        console.log('Datos guardados en productos_jpmascota.json');
-
-        // Convertir a CSV
         if (data.length > 0) {
-            const fields = Object.keys(data[0]);
+            // Guardar JSON
+            fs.writeFileSync('productos_jpmascota.json', JSON.stringify(data, null, 2));
+            console.log(`JSON guardado con ${data.length} productos`);
+
+            // Guardar CSV
+            const fields = ['nombre_producto', 'imagen_url', 'categoria'];
             const json2csvParser = new Parser({ fields });
             const csv = json2csvParser.parse(data);
             fs.writeFileSync('productos_jpmascota.csv', csv);
-            console.log('Datos guardados en productos_jpmascota.csv');
+            console.log('CSV guardado exitosamente');
         } else {
-            console.log('No se encontraron productos para convertir a CSV.');
+            console.log('No se encontraron productos para guardar');
         }
-
     } catch (error) {
-        console.error('Error durante el scraping:', error);
+        console.error('Error en el proceso:', error);
     }
 }
 
